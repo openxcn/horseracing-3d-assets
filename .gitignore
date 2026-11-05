@@ -1,0 +1,15 @@
+# 私钥、密钥、钱包数据、日志、备份、依赖包一律不得入库
+*.pem
+*.key
+*.jks
+*.keystore
+secrets/
+mm-unpacked/
+logs/
+*.log
+node_modules/
+_backup*/
+_bak/
+_archive/
+.env
+.env.*

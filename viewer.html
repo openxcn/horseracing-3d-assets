@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>赛马 3D 模型预览（Horse 3D Model Viewer）</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #101114; color: #eee;
+               font-family: "Microsoft YaHei", "微软雅黑", system-ui, sans-serif; }
+  canvas { display: block; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; padding: 10px 12px; display: flex; gap: 8px;
+         flex-wrap: wrap; align-items: center; background: linear-gradient(#000000cc, #00000000);
+         z-index: 10; }
+  #bar button { background: #1e2026; color: #ddd; border: 1px solid #3a3d45; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  #bar button:hover { border-color: #d7261e; color: #fff; }
+  #bar button.on { background: #d7261e; border-color: #d7261e; color: #fff; }
+  #tip { position: fixed; bottom: 12px; left: 12px; right: 12px; font-size: 12px; color: #9aa0a8;
+         z-index: 10; pointer-events: none; }
+  #status { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 15px;
+            color: #ccc; z-index: 10; background: #000000aa; padding: 14px 20px; border-radius: 8px; }
+  #status.hide { display: none; }
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<div id="status">正在加载（Loading）……</div>
+<div id="tip">左键拖动旋转 · 滚轮缩放 · 右键平移 · 也可以把本地 .glb 文件拖进窗口预览<br>
+Drag to rotate · wheel to zoom · drop a local .glb file anywhere</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from './vendor/GLTFLoader.js';
+import { OrbitControls } from './vendor/OrbitControls.js';
+
+// 本库自带的模型清单（model manifest，模型目录）
+const MODELS = [
+  { file: 'assets/draft_horse.glb',               label: '重型挽马（draft_horse）' },
+  { file: 'assets/horse_wonderunit.glb',          label: '木纹马（horse_wonderunit）' },
+  { file: 'assets/horse_google_modelviewer.glb',  label: '低模演示马（horse_google_modelviewer）' },
+];
+
+const bar = document.getElementById('bar');
+const statusEl = document.getElementById('status');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101114);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(6, 4, 9);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.6, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+
+// 灯光（lighting，照明）
+scene.add(new THREE.HemisphereLight(0xffffff, 0x333333, 1.4));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(5, 10, 7);
+scene.add(sun);
+
+// 地面网格（grid，参考网格）
+const grid = new THREE.GridHelper(40, 40, 0x33363d, 0x23262c);
+scene.add(grid);
+
+const clock = new THREE.Clock();
+let mixer = null;
+let currentRoot = null;
+
+function clearCurrent() {
+  if (mixer) { mixer.stopAllAction(); mixer = null; }
+  if (currentRoot) {
+    scene.remove(currentRoot);
+    currentRoot.traverse((o) => {
+      if (o.isMesh) {
+        o.geometry?.dispose();
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach((m) => { if (m) { m.map?.dispose(); m.dispose(); } });
+      }
+    });
+    currentRoot = null;
+  }
+}
+
+// 归一化（normalize，统一尺寸与落地）：把任意模型缩放到指定高度并踩在地面上
+function fitToGround(root, targetHeight = 4) {
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  const h = size.y > 0 ? size.y : 1;
+  const s = targetHeight / h;
+  root.scale.setScalar(s);
+  root.updateMatrixWorld(true);
+  const box2 = new THREE.Box3().setFromObject(root);
+  root.position.y -= box2.min.y;                       // 让最低点贴地（y=0）
+  root.position.x -= (box2.min.x + box2.max.x) / 2;    // 居中 X
+  root.position.z -= (box2.min.z + box2.max.z) / 2;    // 居中 Z
+  root.updateMatrixWorld(true);
+  return new THREE.Box3().setFromObject(root);
+}
+
+function showModel(gltf, name) {
+  clearCurrent();
+  currentRoot = gltf.scene;
+  scene.add(currentRoot);
+  const box = fitToGround(currentRoot, 4);
+
+  // 动画（animation，骨骼动作）自动播放第一段
+  if (gltf.animations && gltf.animations.length) {
+    mixer = new THREE.AnimationMixer(currentRoot);
+    mixer.clipAction(gltf.animations[0]).play();
+  }
+
+  const target = new THREE.Vector3(0, (box.max.y - box.min.y) / 2, 0);
+  controls.target.copy(target);
+  const radius = Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z) * 1.6 + 3;
+  camera.position.set(radius * 0.62, radius * 0.45, radius * 0.78);
+  controls.update();
+
+  const animCount = gltf.animations ? gltf.animations.length : 0;
+  statusEl.textContent = `已加载（loaded）：${name} ｜ 动画（animations）：${animCount}`;
+  statusEl.classList.remove('hide');
+  setTimeout(() => statusEl.classList.add('hide'), 1800);
+}
+
+const loader = new GLTFLoader();
+
+function loadUrl(url, name, btn) {
+  statusEl.textContent = '正在加载（Loading）：' + name;
+  statusEl.classList.remove('hide');
+  loader.load(url, (gltf) => {
+    showModel(gltf, name);
+    [...bar.querySelectorAll('button')].forEach((b) => b.classList.toggle('on', b === btn));
+  }, undefined, (err) => {
+    console.error(err);
+    statusEl.textContent = '加载失败（Load failed）：' + name;
+  });
+}
+
+MODELS.forEach((m, i) => {
+  const btn = document.createElement('button');
+  btn.textContent = m.label;
+  btn.onclick = () => loadUrl(m.file, m.label, btn);
+  bar.appendChild(btn);
+  if (i === 0) setTimeout(() => btn.click(), 0);
+});
+
+// 拖拽本地 glb / gltf（drag & drop，拖放导入）
+addEventListener('dragover', (e) => e.preventDefault());
+addEventListener('drop', (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer?.files?.[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  loadUrl(url, file.name, null);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (mixer) mixer.update(dt);
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
